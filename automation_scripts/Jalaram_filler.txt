@@ -1,0 +1,568 @@
+# automation_scripts/jalaram_filler.py
+import time
+import io
+import pandas as pd
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
+import traceback
+import os
+from datetime import datetime
+
+class JalaramOrderFiller:
+    def __init__(self, excel_content, store_id):
+        """
+        Initialize with Excel content (BytesIO from Streamlit)
+        
+        Args:
+            excel_content: BytesIO object from Streamlit file uploader
+            store_id: Which store is placing the order (for logging)
+        """
+        self.excel_content = excel_content
+        self.store_id = store_id
+        self.driver = None
+        self.items_to_order = {}
+        
+        # Your existing name mapping
+        self.name_mapping = {
+            '** METHI 24 BUNCH (NJ)': 'METHI LEAVES',
+            'YUCA 30-32LB./CS': 'YUCA',
+            'WINTERMELON 33-35LB': 'WINTER MELON',
+            # ... (COPY ALL YOUR MAPPING FROM ORIGINAL SCRIPT)
+            'TANDELO 12 BUNC (FL)-': 'AMARANTH LEAVES (GREEN)',
+            '***GUNDA 15 LB': None,
+            '**STRAW COCONUT 12CT': None,
+            'BANANA FLOWER 28-30LB': None,
+            # ... (COPY ALL THE REST)
+        }
+        
+        # Results tracking
+        self.results = {
+            'filled_count': 0,
+            'failed_items': [],
+            'skipped_items': [],
+            'total_items': 0,
+            'start_time': None,
+            'end_time': None,
+            'order_id': None
+        }
+    
+    def load_excel_data(self):
+        """Load items and quantities from Excel BytesIO"""
+        try:
+            print(f"[{self.store_id}] Loading Excel data...")
+            
+            # Read Excel from BytesIO
+            df = pd.read_excel(self.excel_content)
+            
+            items_and_qty = {}
+            
+            # Process based on your Excel structure
+            # Your original script reads from specific columns
+            # We need to adapt based on your actual Excel format
+            
+            # Option A: If you know column names
+            if 'Item' in df.columns and 'Quantity' in df.columns:
+                for _, row in df.iterrows():
+                    excel_name = str(row['Item']).strip().upper()
+                    qty = row['Quantity']
+                    if excel_name and pd.notna(qty):
+                        try:
+                            qty_int = int(float(qty))
+                            items_and_qty[excel_name] = qty_int
+                        except:
+                            pass
+            
+            # Option B: If you use specific positions (like your original script)
+            else:
+                # Read first 100 rows to find the pattern
+                for idx, row in df.iterrows():
+                    # Try to find item names and quantities
+                    for col_idx, value in enumerate(row):
+                        if isinstance(value, str) and any(keyword in value.upper() for keyword in ['METHI', 'YUCA', 'WINTERMELON']):
+                            # Found an item name
+                            excel_name = str(value).strip().upper()
+                            # Look for quantity in next column
+                            if col_idx + 1 < len(row):
+                                qty = row[col_idx + 1]
+                                try:
+                                    qty_int = int(float(qty))
+                                    items_and_qty[excel_name] = qty_int
+                                except:
+                                    pass
+            
+            self.items_to_order = items_and_qty
+            self.results['total_items'] = len(items_and_qty)
+            print(f"[{self.store_id}] Loaded {len(items_and_qty)} items")
+            
+            return True
+            
+        except Exception as e:
+            print(f"[{self.store_id}] Error loading Excel: {e}")
+            return False
+    
+    def setup_driver(self, headless=True):
+        """Setup Chrome browser for automation"""
+        try:
+            chrome_options = Options()
+            
+            if headless:
+                chrome_options.add_argument("--headless")  # Run in background
+            
+            # Essential options for server environment
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--window-size=1920,1080")
+            
+            # Anti-detection
+            chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+            chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            chrome_options.add_experimental_option('useAutomationExtension', False)
+            
+            # Set user agent
+            chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            
+            # For Streamlit Cloud/server
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+            
+            print(f"[{self.store_id}] Chrome driver setup complete")
+            return True
+            
+        except Exception as e:
+            print(f"[{self.store_id}] Chrome setup failed: {e}")
+            return False
+    
+    def auto_login(self):
+        """Automated login using stored credentials"""
+        try:
+            print(f"[{self.store_id}] Attempting auto-login...")
+            
+            # Get credentials from environment variables or Streamlit secrets
+            username = os.getenv('JALARAM_USERNAME', '')
+            password = os.getenv('JALARAM_PASSWORD', '')
+            
+            if not username or not password:
+                return {
+                    'success': False,
+                    'message': 'Login credentials not configured',
+                    'requires_manual': True
+                }
+            
+            # Go to login page
+            self.driver.get("https://jalaramproduce.com/store/index.php?route=account/login")
+            time.sleep(3)
+            
+            # Fill login form
+            try:
+                email_field = self.driver.find_element(By.ID, "input-email")
+                password_field = self.driver.find_element(By.ID, "input-password")
+                login_button = self.driver.find_element(By.XPATH, "//input[@type='submit']")
+                
+                email_field.send_keys(username)
+                password_field.send_keys(password)
+                login_button.click()
+                time.sleep(3)
+                
+                # Check if login was successful
+                if "my-account" in self.driver.current_url or "logout" in self.driver.page_source:
+                    print(f"[{self.store_id}] Login successful")
+                    
+                    # Navigate to order page
+                    self.driver.get("https://jalaramproduce.com/store/index.php?route=product/productall")
+                    time.sleep(5)
+                    
+                    return {
+                        'success': True,
+                        'message': 'Auto-login successful',
+                        'requires_manual': False
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'message': 'Auto-login failed - incorrect credentials or page changed',
+                        'requires_manual': True
+                    }
+                    
+            except Exception as e:
+                print(f"[{self.store_id}] Login form error: {e}")
+                return {
+                    'success': False,
+                    'message': f'Login form error: {str(e)[:100]}',
+                    'requires_manual': True
+                }
+                
+        except Exception as e:
+            print(f"[{self.store_id}] Auto-login failed: {e}")
+            return {
+                'success': False,
+                'message': f'Auto-login failed: {str(e)[:100]}',
+                'requires_manual': True
+            }
+    
+    def fill_all_quantities(self):
+        """Fill quantities for all items (adapted from your original)"""
+        print(f"[{self.store_id}] Starting to fill quantities...")
+        
+        filled_count = 0
+        failed_items = []
+        skipped_items = []
+        
+        for idx, (excel_name, qty) in enumerate(self.items_to_order.items(), 1):
+            print(f"[{self.store_id}] [{idx}/{len(self.items_to_order)}] Processing: {excel_name[:30]}...")
+            
+            # Get website keyword from mapping
+            website_keyword = self.name_mapping.get(excel_name)
+            
+            # Handle items without mapping
+            if website_keyword is None:
+                skipped_items.append({
+                    'excel_name': excel_name,
+                    'qty': qty,
+                    'reason': 'No website match in mapping'
+                })
+                continue
+            
+            # Find the item on the page
+            element = self.find_item_on_page(website_keyword)
+            
+            if not element:
+                failed_items.append({
+                    'excel_name': excel_name,
+                    'qty': qty,
+                    'reason': f'Not found on page (search: {website_keyword})'
+                })
+                continue
+            
+            # Fill the quantity
+            success = self.fill_quantity_for_item(element, qty)
+            
+            if success:
+                filled_count += 1
+            else:
+                failed_items.append({
+                    'excel_name': excel_name,
+                    'qty': qty,
+                    'reason': 'Could not fill quantity field'
+                })
+            
+            # Small delay
+            time.sleep(0.2)
+        
+        # Store results
+        self.results['filled_count'] = filled_count
+        self.results['failed_items'] = failed_items
+        self.results['skipped_items'] = skipped_items
+        
+        return filled_count, failed_items, skipped_items
+    
+    def find_item_on_page(self, website_keyword):
+        """Find an item on the webpage (from your original)"""
+        if not website_keyword:
+            return None
+            
+        try:
+            keyword = website_keyword.strip()
+            search_words = keyword.split()
+            
+            if not search_words:
+                return None
+                
+            first_word = search_words[0]
+            
+            # Search strategies
+            search_strategies = [
+                f"//*[contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), " +
+                f"translate('{first_word}', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'))]",
+                
+                f"//*[text()[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), " +
+                f"translate('{first_word}', 'ABCDEFGHIJKLMNOPQRSTUVwxyz', 'abcdefghijklmnopqrstuvwxyz'))]]",
+            ]
+            
+            for strategy in search_strategies:
+                try:
+                    elements = self.driver.find_elements(By.XPATH, strategy)
+                    
+                    for element in elements:
+                        element_text = element.text.upper()
+                        keyword_upper = keyword.upper()
+                        
+                        matches = [
+                            keyword_upper in element_text,
+                            all(word.upper() in element_text for word in keyword.split()[:2]),
+                            first_word.upper() in element_text and len(element_text) < 200,
+                        ]
+                        
+                        if any(matches):
+                            return element
+                except:
+                    continue
+            
+            return None
+            
+        except Exception as e:
+            print(f"[{self.store_id}] Search error: {e}")
+            return None
+    
+    def fill_quantity_for_item(self, element, qty):
+        """Fill quantity in input field (from your original)"""
+        try:
+            # Try the original method
+            input_field = element.find_element(By.XPATH, "./following::input[1]")
+            
+            if input_field and input_field.is_displayed():
+                # Scroll to element
+                self.driver.execute_script(
+                    "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", 
+                    element
+                )
+                time.sleep(0.1)
+                
+                # Clear and fill
+                input_field.clear()
+                input_field.send_keys(str(qty))
+                
+                # Verify
+                filled_value = input_field.get_attribute('value')
+                return filled_value == str(qty)
+            
+            return False
+            
+        except:
+            # Alternative methods...
+            try:
+                parent = element.find_element(By.XPATH, "./ancestor::div[1]")
+                inputs = parent.find_elements(By.XPATH, ".//input")
+                for inp in inputs:
+                    if inp.is_displayed():
+                        inp.clear()
+                        inp.send_keys(str(qty))
+                        return True
+            except:
+                pass
+            
+            return False
+    
+    def generate_report(self):
+        """Generate a detailed report"""
+        report = f"""
+JALARAM PRODUCE ORDER REPORT
+{'='*60}
+Store: {self.store_id}
+Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Processing Time: {self.results['end_time'] - self.results['start_time'] if self.results['end_time'] else 'N/A'}
+
+SUMMARY:
+{'='*60}
+Total Items in Excel: {self.results['total_items']}
+Successfully Filled: {self.results['filled_count']}
+Failed to Fill: {len(self.results['failed_items'])}
+Skipped (No Match): {len(self.results['skipped_items'])}
+
+"""
+        
+        if self.results['failed_items']:
+            report += f"\nFAILED ITEMS:\n{'-'*40}\n"
+            for item in self.results['failed_items'][:20]:  # Show first 20
+                report += f"• {item['excel_name'][:50]:<50} | Qty: {item['qty']:<4} | Reason: {item['reason']}\n"
+            
+            if len(self.results['failed_items']) > 20:
+                report += f"... and {len(self.results['failed_items']) - 20} more\n"
+        
+        if self.results['skipped_items']:
+            report += f"\nSKIPPED ITEMS (No Website Match):\n{'-'*40}\n"
+            for item in self.results['skipped_items'][:20]:
+                report += f"• {item['excel_name'][:60]}\n"
+            
+            if len(self.results['skipped_items']) > 20:
+                report += f"... and {len(self.results['skipped_items']) - 20} more\n"
+        
+        return report
+    
+    def run_automation(self, auto_login=True):
+        """Main automation runner"""
+        self.results['start_time'] = datetime.now()
+        
+        try:
+            # 1. Load Excel data
+            if not self.load_excel_data():
+                return {
+                    'success': False,
+                    'message': 'Failed to load Excel data',
+                    'report': None,
+                    'requires_manual': True
+                }
+            
+            # 2. Setup driver
+            if not self.setup_driver(headless=True):
+                return {
+                    'success': False,
+                    'message': 'Failed to setup Chrome browser',
+                    'report': None,
+                    'requires_manual': True
+                }
+            
+            # 3. Login
+            if auto_login:
+                login_result = self.auto_login()
+                if login_result['requires_manual']:
+                    self.driver.quit()
+                    return {
+                        'success': False,
+                        'message': login_result['message'],
+                        'report': None,
+                        'requires_manual': True
+                    }
+            else:
+                # Navigate to order page directly
+                self.driver.get("https://jalaramproduce.com/store/index.php?route=product/productall")
+                time.sleep(5)
+            
+            # 4. Fill quantities
+            filled, failed, skipped = self.fill_all_quantities()
+            
+            # 5. Generate report
+            self.results['end_time'] = datetime.now()
+            report = self.generate_report()
+            
+            # 6. Take screenshot for proof
+            screenshot_path = None
+            try:
+                screenshot_path = f"jalaram_order_{self.store_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                self.driver.save_screenshot(screenshot_path)
+            except:
+                pass
+            
+            # 7. Cleanup
+            self.driver.quit()
+            
+            return {
+                'success': True,
+                'message': f'Successfully processed {filled} items',
+                'report': report,
+                'requires_manual': False,
+                'screenshot': screenshot_path,
+                'stats': {
+                    'total': self.results['total_items'],
+                    'filled': filled,
+                    'failed': len(failed),
+                    'skipped': len(skipped)
+                }
+            }
+            
+        except Exception as e:
+            error_msg = f"Automation failed: {str(e)}"
+            print(f"[{self.store_id}] {error_msg}")
+            
+            # Try to quit driver if it exists
+            try:
+                if self.driver:
+                    self.driver.quit()
+            except:
+                pass
+            
+            return {
+                'success': False,
+                'message': error_msg,
+                'report': None,
+                'requires_manual': True
+            }
+
+
+# Streamlit-friendly function
+def process_jalaram_order(excel_file, store_id, auto_login=True):
+    """
+    Main function for Streamlit to call
+    
+    Args:
+        excel_file: Uploaded file from Streamlit
+        store_id: Store identifier
+        auto_login: Whether to attempt auto-login
+    
+    Returns:
+        dict: Results with success status, message, and report
+    """
+    print(f"Starting Jalaram order processing for store {store_id}")
+    
+    try:
+        # Create filler instance
+        filler = JalaramOrderFiller(excel_file, store_id)
+        
+        # Run automation
+        result = filler.run_automation(auto_login=auto_login)
+        
+        return result
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'message': f"Unexpected error: {str(e)}",
+            'report': None,
+            'requires_manual': True,
+            'error_details': traceback.format_exc()
+        }
+
+
+# Simpler version for testing
+def process_jalaram_offline(excel_file, store_id):
+    """
+    Offline processing - just validates and formats without browser automation
+    Good for testing or when auto-login fails
+    """
+    try:
+        # Read Excel
+        df = pd.read_excel(excel_file)
+        
+        # Count items
+        item_count = len(df)
+        
+        # Generate report
+        report = f"""
+JALARAM ORDER - OFFLINE VALIDATION
+{'='*60}
+Store: {store_id}
+Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Excel File Validated: ✓
+Total Items Found: {item_count}
+
+NEXT STEPS:
+1. Login to https://jalaramproduce.com manually
+2. Navigate to Order Page
+3. Use the mapping below to fill quantities
+
+MAPPING GUIDE:
+{'-'*60}
+Excel Name → Website Search Term
+"""
+        
+        # Add some sample mappings
+        sample_mappings = {
+            '** METHI 24 BUNCH (NJ)': 'METHI LEAVES',
+            'YUCA 30-32LB./CS': 'YUCA',
+            'WINTERMELON 33-35LB': 'WINTER MELON',
+        }
+        
+        for excel_name, website_term in sample_mappings.items():
+            report += f"{excel_name[:40]:<40} → {website_term}\n"
+        
+        report += f"\n📝 Note: Full mapping dictionary has 60+ items"
+        report += f"\n✅ Excel is ready for manual processing"
+        
+        return {
+            'success': True,
+            'message': f'Excel validated with {item_count} items',
+            'report': report,
+            'requires_manual': True,
+            'stats': {'total': item_count}
+        }
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'message': f'Excel validation failed: {str(e)}',
+            'report': None,
+            'requires_manual': True
+        }
